@@ -1,9 +1,11 @@
 package raft
 
 import (
+	"errors"
 	"net"
 	"net/rpc"
 	"sync"
+	"time"
 )
 
 type service struct{ r *Raft }
@@ -34,39 +36,48 @@ func Dial(addr string) Peer {
 	return &remote{addr: addr}
 }
 
-func (p *remote) call(method string, args, reply any) error {
+func (p *remote) RequestVote(v Vote) (Reply, error) {
+	return p.call("Raft.RequestVote", v)
+}
+
+func (p *remote) AppendEntries(a Append) (Reply, error) {
+	return p.call("Raft.AppendEntries", a)
+}
+
+func (p *remote) call(method string, args any) (Reply, error) {
 	p.mu.Lock()
 	if p.client == nil {
 		c, err := rpc.Dial("tcp", p.addr)
 		if err != nil {
 			p.mu.Unlock()
-			return err
+			return Reply{}, err
 		}
 		p.client = c
 	}
 	c := p.client
 	p.mu.Unlock()
 
-	err := c.Call(method, args, reply)
-	if err != nil {
-		p.mu.Lock()
-		if p.client == c {
-			c.Close()
-			p.client = nil
+	reply := new(Reply)
+	call := c.Go(method, args, reply, make(chan *rpc.Call, 1))
+
+	select {
+	case <-call.Done:
+		if call.Error == nil {
+			return *reply, nil
 		}
-		p.mu.Unlock()
+		p.drop(c)
+		return Reply{}, call.Error
+	case <-time.After(timeout):
+		p.drop(c)
+		return Reply{}, errors.New(p.addr + " timed out")
 	}
-	return err
 }
 
-func (p *remote) RequestVote(v Vote) (Reply, error) {
-	var reply Reply
-	err := p.call("Raft.RequestVote", v, &reply)
-	return reply, err
-}
-
-func (p *remote) AppendEntries(a Append) (Reply, error) {
-	var reply Reply
-	err := p.call("Raft.AppendEntries", a, &reply)
-	return reply, err
+func (p *remote) drop(c *rpc.Client) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.client == c {
+		c.Close()
+		p.client = nil
+	}
 }

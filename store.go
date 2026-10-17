@@ -29,7 +29,11 @@ func (s *store) lookup(key string) (entry, bool) {
 	s.mu.RUnlock()
 
 	if ok && e.expired() {
-		s.del(key)
+		s.mu.Lock()
+		if cur, ok := s.data[key]; ok && cur.expired() {
+			delete(s.data, key)
+		}
+		s.mu.Unlock()
 		return entry{}, false
 	}
 	return e, ok

@@ -2,4 +2,3 @@ miniredis
 shard/shard
 *.aof
 .DS_Store
-raft/raftnode

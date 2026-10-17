@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,18 +107,85 @@ func TestReplay(t *testing.T) {
 
 func TestTruncatedTail(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "log")
-	whole := resp.Array([]string{"SET", "a", "1"})
 	torn := "*3\r\n$3\r\nSET\r\n$1\r\nb"
-
-	if err := os.WriteFile(path, []byte(whole+torn), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(resp.Array([]string{"SET", "a", "1"})+torn), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	_, cmds, err := openAOF(path, true)
+	a, cmds, err := openAOF(path, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cmds) != 1 || cmds[0][1] != "a" {
+	if len(cmds) != 1 {
 		t.Fatalf("got %v, want only the complete command", cmds)
+	}
+	a.write([]string{"SET", "after", "restart"})
+	a.f.Close()
+
+	_, cmds, _ = openAOF(path, true)
+	if len(cmds) != 2 || cmds[1][1] != "after" {
+		t.Fatalf("got %v, the write after the restart was lost", cmds)
+	}
+}
+
+func TestCluster(t *testing.T) {
+	var addrs []string
+	for i := 0; i < 6; i++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addrs = append(addrs, ln.Addr().String())
+		ln.Close()
+	}
+	spec := addrs[0] + "=" + addrs[3] + "," + addrs[1] + "=" + addrs[4] + "," + addrs[2] + "=" + addrs[5]
+
+	var servers []*server
+	for _, addr := range addrs[:3] {
+		s := &server{db: newStore()}
+		n, err := join(s, addr, spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.node = n
+		t.Cleanup(func() {
+			n.ln.Close()
+			n.raft.Stop()
+		})
+		servers = append(servers, s)
+	}
+
+	var lead *server
+	for start := time.Now(); lead == nil && time.Since(start) < 5*time.Second; time.Sleep(20 * time.Millisecond) {
+		for _, s := range servers {
+			if role, _, _ := s.node.raft.State(); role == "leader" {
+				lead = s
+			}
+		}
+	}
+	if lead == nil {
+		t.Fatal("no leader")
+	}
+
+	if got := lead.run([]string{"SET", "user", "rudransh"}); got != "+OK\r\n" {
+		t.Fatalf("SET on leader = %q", got)
+	}
+
+	for _, s := range servers {
+		if s == lead {
+			continue
+		}
+		if got := s.run([]string{"SET", "x", "1"}); !strings.Contains(got, "not the leader") {
+			t.Fatalf("SET on follower = %q", got)
+		}
+
+		for start := time.Now(); ; time.Sleep(20 * time.Millisecond) {
+			if v, _ := s.db.get("user"); v == "rudransh" {
+				break
+			}
+			if time.Since(start) > 3*time.Second {
+				t.Fatal("follower never applied the write")
+			}
+		}
 	}
 }

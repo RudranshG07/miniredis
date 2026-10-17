@@ -14,8 +14,9 @@ import (
 )
 
 type server struct {
-	db  *store
-	aof *aof
+	db   *store
+	aof  *aof
+	node *node
 }
 
 func (s *server) serve(ln net.Listener) {
@@ -47,6 +48,21 @@ func (s *server) handle(conn net.Conn) {
 }
 
 func (s *server) run(args []string) string {
+	if s.node != nil && isWrite(args[0]) {
+		return s.node.replicate(args)
+	}
+	return s.exec(args)
+}
+
+func isWrite(cmd string) bool {
+	switch strings.ToUpper(cmd) {
+	case "SET", "DEL", "FLUSHALL":
+		return true
+	}
+	return false
+}
+
+func (s *server) exec(args []string) string {
 	cmd := strings.ToUpper(args[0])
 
 	switch {

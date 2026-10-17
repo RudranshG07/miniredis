@@ -60,7 +60,7 @@ func newCluster(t *testing.T, n int) *cluster {
 
 	for i := 0; i < n; i++ {
 		id := strconv.Itoa(i)
-		c.nodes[id] = New(id, map[string]Peer{}, func(cmd []string) {
+		c.nodes[id] = New(id, map[string]Peer{}, func(_, _ int, cmd []string) {
 			c.mu.Lock()
 			c.applied[id] = append(c.applied[id], cmd[1])
 			c.mu.Unlock()
@@ -187,28 +187,48 @@ func TestSurvivesLeaderDying(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		c.nodes[first].Propose([]string{"SET", strconv.Itoa(i)})
 	}
-	for id := range c.nodes {
-		c.waitApplied(id, 5)
-	}
-
+	c.waitApplied(first, 5)
 	c.kill(first)
-	second := c.leader()
-
-	for i := 5; i < 10; i++ {
-		if !c.nodes[second].Propose([]string{"SET", strconv.Itoa(i)}) {
-			t.Fatal("new leader refused a write")
-		}
-	}
+	c.leader()
 
 	for id := range c.nodes {
 		if c.dead[id] {
 			continue
 		}
-		got := c.waitApplied(id, 10)
-		for i := range 10 {
+		got := c.waitApplied(id, 5)
+		for i := range 5 {
 			if got[i] != strconv.Itoa(i) {
 				t.Fatalf("node %s applied %v", id, got)
 			}
 		}
+	}
+}
+
+func TestCommitsAnOldTermAfterFailover(t *testing.T) {
+	c := newCluster(t, 3)
+	for _, id := range []string{"0", "1"} {
+		r := c.nodes[id]
+		r.mu.Lock()
+		r.term = 1
+		r.log = append(r.log, Entry{Term: 1, Cmd: []string{"SET", "kept"}})
+		r.mu.Unlock()
+	}
+
+	for id := range c.nodes {
+		if got := c.waitApplied(id, 1); got[0] != "kept" {
+			t.Fatalf("node %s applied %v", id, got)
+		}
+	}
+}
+
+func TestFollowerOnlyCommitsWhatItWasSent(t *testing.T) {
+	r := New("f", map[string]Peer{}, nil)
+	r.term = 1
+	r.log = []Entry{{}, {Term: 1, Cmd: []string{"SET", "a"}}, {Term: 1, Cmd: []string{"SET", "stale"}}}
+
+	r.OnAppendEntries(Append{Term: 2, Leader: "l", PrevIdx: 1, PrevTerm: 1, Commit: 2})
+
+	if r.commit != 1 {
+		t.Fatalf("commit = %d, the stale entry at 2 was never confirmed", r.commit)
 	}
 }

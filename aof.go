@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"io"
 	"os"
 	"sync"
@@ -16,19 +17,33 @@ type aof struct {
 }
 
 func openAOF(path string, fsync bool) (*aof, [][]string, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
-	if err != nil {
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
 		return nil, nil, err
 	}
 
+	src := bytes.NewReader(data)
+	r := bufio.NewReader(src)
 	var cmds [][]string
-	r := bufio.NewReader(f)
+	good := 0
 	for {
 		args, err := resp.ReadCommand(r)
 		if err != nil {
 			break
 		}
 		cmds = append(cmds, args)
+		good = len(data) - src.Len() - r.Buffered()
+	}
+
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, nil, err
+	}
+	if good < len(data) {
+		if err := f.Truncate(int64(good)); err != nil {
+			f.Close()
+			return nil, nil, err
+		}
 	}
 	return &aof{f: f, fsync: fsync}, cmds, nil
 }
